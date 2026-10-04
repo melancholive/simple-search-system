@@ -1,0 +1,10 @@
+cmake-build-*/
+.idea/
+*.tsv
+*.exe
+temp_*.txt
+output.txt
+Term Counts.txt
+posting.txt
+pagetable.txt
+stats.txt

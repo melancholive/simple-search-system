@@ -43,8 +43,7 @@ int main() {
         return 1;
     }
 
-    std::ofstream postingsFile("posting.txt"); // Term, Doc ID, Frequency 
-    if (!postingsFile) { 
+    if (!postingsFile) {
         std::cout << "Could not create posting file\n";
         return 1;
     }
@@ -70,17 +69,15 @@ int main() {
             word_count++;
             term_count[word]++;
             passage_terms[word]++;
-            outFile << word << " | ";
         }
         outFile << "\n";
         for (auto& p : passage_terms) inverted_index[p.first].emplace_back(count, p.second);
         outFile << "\n";
-        pageFile << "DocID" << " | " << "word_count" << "\n";
         pageFile << DocID << " | " << word_count << "\n";
         count++;
     }
-        termFile << "Term Count:" "\n";
-        for (auto& p : term_count) termFile << p.first << ": " << p.second << "\n";
+    termFile << "Term Count:" "\n";
+    for (auto& p : term_count) termFile << p.first << ": " << p.second << "\n";
 
     postingsFile << "Term | (Doc ID, Frequency)\n"; // heading
     for (auto& entry : inverted_index) {
