@@ -31,20 +31,20 @@ int main() {
         return 1;
     }
 
-    std::ofstream termFile("Term Counts.txt"); // this is for the terms and their counts go here. Can delete it
+    std::ofstream termFile("Term Counts.txt"); // this is for the terms and their counts go here. Can delete it later, Just for visual
     if (!termFile) {
         std::cout << "Could not create Term Count file\n";
         return 1;
     }
 
-    std::ofstream pageFile("pagetable.txt"); // docID passageID length
+    std::ofstream pageFile("pagetable.txt"); // docID length
     if (!pageFile) {
         std::cout << "Could not create page table file\n";
         return 1;
     }
 
-    std::ofstream postingsFile("posting.txt");
-    if (!postingsFile) {
+    std::ofstream postingsFile("posting.txt"); // Term, Doc ID, Frequency 
+    if (!postingsFile) { 
         std::cout << "Could not create posting file\n";
         return 1;
     }
@@ -82,7 +82,7 @@ int main() {
         termFile << "Term Count:" "\n";
         for (auto& p : term_count) termFile << p.first << ": " << p.second << "\n";
 
-    postingsFile << "Term | (Doc ID, Frequency)\n";   // heading
+    postingsFile << "Term | (Doc ID, Frequency)\n"; // heading
     for (auto& entry : inverted_index) {
         postingsFile << entry.first << ":"; // this is for the term
         for (auto& posting : entry.second)
