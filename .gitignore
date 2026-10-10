@@ -8,3 +8,8 @@ Term Counts.txt
 posting.txt
 pagetable.txt
 stats.txt
+*.csv
+*.bin
+lexicon.txt
+blockmeta.txt
+merged.txt
