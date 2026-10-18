@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <chrono>
 #include <cstdio> // For std::remove
 
 std::string line;
@@ -22,14 +23,15 @@ int main() {
         std::cout << "Could not open the file\n";
         return 1;
     }
-
-    std::ofstream pageFile("pagetable.csv"); // docID length
+    auto start = std::chrono::steady_clock::now(); // start the timer
+    auto total_start = std::chrono::steady_clock::now(); // total timer, never restarts
+    std::ofstream pageFile("pagetable.csv"); // docID and length
     if (!pageFile) {
         std::cout << "Could not create page table file\n";
         return 1;
     }
-    pageFile << "DocID" << "," << "word_count" << "\n";
-
+    pageFile << "DocID" << "," << "word_count" << "\n"; 
+    
     while (std::getline(file, line)) {
         // grab the line from the file
         size_t tab = line.find('\t'); // find the tab which is between the ID and the text
@@ -45,9 +47,8 @@ int main() {
         std::map<std::string, int> passage_terms;
         while (ss >> word) {
             // to keep giving the next word
-                word_count++;
-                passage_terms[word]++;
-
+                word_count++; // counts the number of words in the passage
+                passage_terms[word]++; // counts the frequency of each word in the passage
         }
         for (auto& p : passage_terms) inverted_index[p.first].emplace_back(count, p.second);
         pageFile << DocID << "," << word_count << "\n";
@@ -62,6 +63,8 @@ int main() {
                 }
             }
             inverted_index.clear(); // after each temp file is written, so temp files no longer repeat earlier postings.
+            std::cout << "temp_" << temp_number << " seconds: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "\n";
+            start = std::chrono::steady_clock::now(); // restart the timer for the next temp file
             temp_number++;  // next file number
         }
     }
@@ -74,11 +77,16 @@ int main() {
         }
     }
     std::ofstream statsFile("stats.csv");
-    statsFile << "Passage Count," << count << "\n";
+    statsFile << "Number of DocIDs," << count << "\n";
     statsFile << "Average Passage Length," << (double) total_words / count << "\n"; // avg passage length = total_words ÷ number of passages
     std::cout << "Total lines read: " << count << "\n";
     pageFile.close();
     tempFile.close();
     statsFile.close();
+    std::cout << "Total seconds: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count() << "\n";
     return 0;
 }
+//my own notes
+// I used comma so that it is easier to read the csv files in excel. 
+// I used a map to store the inverted index because it allows for efficient lookups and insertions.
+// I used a vector of pairs to store the document ID and frequency for each term, which allows for easy iteration and storage of multiple postings for each term.
