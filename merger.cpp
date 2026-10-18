@@ -2,6 +2,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <chrono>
 
 const int BLOCK_SIZE = 128; // postings per block 
 // One open temp file and the row it is currently on
@@ -18,8 +19,9 @@ std::ofstream indexFile("index.bin", std::ios::binary); // compressed inverted l
 std::ofstream lexiconFile("lexicon.txt"); // term  start  num_postings  num_blocks  first_block
 std::ofstream metaFile("blockmeta.txt"); // per block: last_docID  docID_bytes  freq_bytes
 long long index_position = 0; // bytes written to index.bin so far
-long long block_number = 0;   // blocks written so far
+long long block_number = 0; // blocks written so far
 // Read the next row of one temp file (a line like  apple,19,10)
+
 void readNext(TempFile& t) {
     std::string line;
     if (!std::getline(t.file, line)) { t.done = true; return; } // no more rows
@@ -89,6 +91,7 @@ void writeList(const std::string& term, const std::vector<int>& docIDs, const st
                 << num_blocks << " " << first_block << "\n";
 }
 int main() {
+    auto start = std::chrono::steady_clock::now();
     openTempFiles();
     int words = 0;
     while (true) {
@@ -109,5 +112,8 @@ int main() {
     }
     std::cout << "Done: " << words << " words, " << block_number << " blocks, "
               << index_position << " bytes in index.bin\n";
+    std::cout << "Total merger time: "
+          << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
+          << " seconds\n";
     return 0;
 }
