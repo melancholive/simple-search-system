@@ -54,7 +54,7 @@ int main() {
         pageFile << DocID << "," << word_count << "\n";
         total_words += word_count;
         count++;
-        if (count % 500000 == 0) {
+        if (count % 750000 == 0) {
             std::ofstream tempFile("temp_" + std::to_string(temp_number) + ".csv");
             tempFile << "Term,DocID,Frequency\n";
             for (auto& entry : inverted_index) {
@@ -76,6 +76,8 @@ int main() {
             tempFile << entry.first << "," << posting.first << "," << posting.second << "\n";
         }
     }
+    std::cout << "temp_" << temp_number << " seconds: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << "\n";
+    start = std::chrono::steady_clock::now();
     std::ofstream statsFile("stats.csv");
     statsFile << "Number of DocIDs," << count << "\n";
     statsFile << "Average Passage Length," << (double) total_words / count << "\n"; // avg passage length = total_words ÷ number of passages
