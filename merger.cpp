@@ -2,7 +2,6 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <sstream>
 #include <algorithm>
 #include <chrono>
 
@@ -25,10 +24,15 @@ std::vector<TempFile> temp_files;
 
 void readNext(TempFile& temp) {
     std::string line;
-    if (!std::getline(temp.file, line)) { temp.done = true; return; } // file finished
-    for (char& c : line) if (c == ',') c = ' '; // replace commas with spaces so we can use stringstream to read the values
-    std::stringstream ss(line);
-    ss >> temp.term >> temp.docID >> temp.freq;
+    if (!std::getline(temp.file, line)) {
+        temp.done = true;
+        return;
+    }
+    size_t c1 = line.find(',');            // position of the 1st comma
+    size_t c2 = line.find(',', c1 + 1);    // position of the 2nd comma
+    temp.term  = line.substr(0, c1);                               // text before the 1st comma
+    temp.docID = std::stoi(line.substr(c1 + 1, c2 - c1 - 1));      // text between the commas → number
+    temp.freq  = std::stoi(line.substr(c2 + 1));                   // text after the 2nd comma → number
 }
 
 std::string smallestTerm() {
@@ -91,12 +95,12 @@ int main() {
         std::string term = smallestTerm();// next word A-Z
         if (term == "") break; // all temp files finished
 
-        std::vector<int> docIDs, freqs;      // this word's postings
-        for (TempFile& temp : temp_files) {  // go through files in order (keeps docIDs sorted)
+        std::vector<int> docIDs, freqs;  // this word's postings
+        for (TempFile& temp : temp_files) { // go through files in order (keeps docIDs sorted)
             while (!temp.done && temp.term == term) {
                 docIDs.push_back(temp.docID);
                 freqs.push_back(temp.freq);
-                readNext(temp);              // move this file to its next row
+                readNext(temp); // move this file to its next row
             }
         }
         writeList(term, docIDs, freqs); // Write the postings for this word
@@ -104,7 +108,6 @@ int main() {
     }
     std::cout << "Done: " << words << " words, " << block_number << " blocks, "
               << index_position << " bytes in index.bin\n";
-    std::cout << "Total words: " << words << "\n";
-    std::cout << "Total Merger time taken: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() << "\n";
+    std::cout << "Total Merger time taken: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() << " seconds\n";
     return 0;
 }
