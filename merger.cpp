@@ -2,67 +2,51 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <algorithm>
 #include <chrono>
 
 const int BLOCK_SIZE = 128; // postings per block 
-// One open temp file and the row it is currently on
-struct TempFile {
-    std::ifstream file;
-    std::string term; // current row: term
-    int docID = 0; // current row: docID
-    int freq = 0; // current row: frequency
-    bool done = false; // true when this file has no rows left
-};
-std::vector<TempFile> temp_files; // all the open temp files
-// The output files
 std::ofstream indexFile("index.bin", std::ios::binary); // compressed inverted lists
 std::ofstream lexiconFile("lexicon.txt"); // term  start  num_postings  num_blocks  first_block
 std::ofstream metaFile("blockmeta.txt"); // per block: last_docID  docID_bytes  freq_bytes
 long long index_position = 0; // bytes written to index.bin so far
 long long block_number = 0; // blocks written so far
-// Read the next row of one temp file (a line like  apple,19,10)
 
-void readNext(TempFile& t) {
+struct TempFile {
+    std::ifstream file;// it opens the temp file, it holds the data from the temp file
+    std::string term; // the term from the temp file
+    int docID = 0; // the docID from the temp file     
+    int freq = 0;  // the frequency from the temp file      
+    bool done = false; // if the temp file is done reading, it will be true  
+};
+std::vector<TempFile> temp_files;
+// The output files
+
+void readNext(TempFile& temp) {
     std::string line;
-    if (!std::getline(t.file, line)) { t.done = true; return; } // no more rows
-    if (!line.empty() && line.back() == '\r') line.pop_back(); // Windows line endings
-    size_t c1 = line.find(','); // first comma
-    size_t c2 = line.find(',', c1 + 1); // second comma
-    t.term  = line.substr(0, c1);
-    t.docID = std::stoi(line.substr(c1 + 1, c2 - c1 - 1));
-    t.freq  = std::stoi(line.substr(c2 + 1));
+    if (!std::getline(temp.file, line)) { temp.done = true; return; } // file finished
+    for (char& c : line) if (c == ',') c = ' '; // replace commas with spaces so we can use stringstream to read the values
+    std::stringstream ss(line);
+    ss >> temp.term >> temp.docID >> temp.freq;
 }
-// Open temp_0.csv, temp_1.csv, ... and read the first row of each
-void openTempFiles() {
-    for (int i = 0; ; i++) {
-        TempFile t;
-        t.file.open("temp_" + std::to_string(i) + ".csv");
-        if (!t.file) break; // no more temp files
-        std::string heading;
-        std::getline(t.file, heading); // skip the "Term,DocID,Frequency" heading line
-        readNext(t); // load the first row
-        temp_files.push_back(std::move(t));
-    }
-    std::cout << "Found " << temp_files.size() << " temp files\n";
-}
-// Find the smallest term among the current rows of all temp files ("" if all files are done)
+
 std::string smallestTerm() {
     std::string smallest = "";
-    for (TempFile& t : temp_files) {
-        if (t.done) continue;
-        if (smallest == "" || t.term < smallest) smallest = t.term;
+    for (TempFile& temp : temp_files) {
+        if (temp.done) continue; // skip finished files
+        if (smallest == "" || temp.term < smallest) smallest = temp.term;
     }
-    return smallest;
+    return smallest; // means all files are finished
 }
-// Turn one number into 1 or more bytes (varbyte encoding)
+
 void varbyteEncode(unsigned int num, std::vector<unsigned char>& bytes) {
     while (num >= 128) {
-        bytes.push_back(128 + (num & 127)); // lowest 7 bits, top bit 1 = "more bytes follow"
-        num = num >> 7;
+        bytes.push_back(128 + (num & 127)); // lowest 7 bits + "more bytes coming"
+        num = num >> 7; // drop those 7 bits
     }
-    bytes.push_back(num);                   // last byte, top bit 0
+    bytes.push_back(num); // last byte
 }
-// Compress one word's list and write it, in blocks of 128 postings
 void writeList(const std::string& term, const std::vector<int>& docIDs, const std::vector<int>& freqs) {
     long long start = index_position;
     long long first_block = block_number;
@@ -75,45 +59,52 @@ void writeList(const std::string& term, const std::vector<int>& docIDs, const st
         for (size_t i = b; i < end; i++) {
             varbyteEncode(docIDs[i] - previous, docBytes); // docID gap: 19, 27, 39 -> 19, 8, 12
             previous = docIDs[i];
-            varbyteEncode(freqs[i], freqBytes);            // frequency
+            varbyteEncode(freqs[i], freqBytes); // frequency
         }
         // docIDs first, then freqs (not mixed)
         indexFile.write((char*) docBytes.data(), docBytes.size());
         indexFile.write((char*) freqBytes.data(), freqBytes.size());
         index_position += docBytes.size() + freqBytes.size();
 
-        // block info: last docID, size of docID part, size of freq part
-        metaFile << docIDs[end - 1] << " " << docBytes.size() << " " << freqBytes.size() << "\n";
+        metaFile << docIDs[end - 1] << " " << docBytes.size() << " " << freqBytes.size() << "\n"; // block info: last docID, size of docID part, size of freq part
         num_blocks++;
         block_number++;
     }
     lexiconFile << term << " " << start << " " << docIDs.size() << " "
                 << num_blocks << " " << first_block << "\n";
 }
+
 int main() {
-    auto start = std::chrono::steady_clock::now();
-    openTempFiles();
+    auto start_time = std::chrono::steady_clock::now();
+    for (int i = 0; ; i++) {
+        TempFile temp;
+        temp.file.open("temp_" + std::to_string(i) + ".csv");
+        if (!temp.file) break;
+        std::string heading;
+        std::getline(temp.file, heading); // skip heading
+        readNext(temp); // read the first row
+        temp_files.push_back(std::move(temp));
+    }
+    std::cout << "Found " << temp_files.size() << " temp files\n";
     int words = 0;
     while (true) {
-        std::string term = smallestTerm();   // next word in A-Z order
-        if (term == "") break;               // all temp files are finished
+        std::string term = smallestTerm();// next word A-Z
+        if (term == "") break; // all temp files finished
 
-        // collect this word's postings from every temp file, in file order (keeps docIDs sorted)
-        std::vector<int> docIDs, freqs;
-        for (TempFile& t : temp_files) {
-            while (!t.done && t.term == term) {
-                docIDs.push_back(t.docID);
-                freqs.push_back(t.freq);
-                readNext(t);
+        std::vector<int> docIDs, freqs;      // this word's postings
+        for (TempFile& temp : temp_files) {  // go through files in order (keeps docIDs sorted)
+            while (!temp.done && temp.term == term) {
+                docIDs.push_back(temp.docID);
+                freqs.push_back(temp.freq);
+                readNext(temp);              // move this file to its next row
             }
         }
-        writeList(term, docIDs, freqs);
+        writeList(term, docIDs, freqs); // Write the postings for this word
         words++;
     }
     std::cout << "Done: " << words << " words, " << block_number << " blocks, "
               << index_position << " bytes in index.bin\n";
-    std::cout << "Total merger time: "
-          << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
-          << " seconds\n";
+    std::cout << "Total words: " << words << "\n";
+    std::cout << "Total Merger time taken: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() << "\n";
     return 0;
 }
