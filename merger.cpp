@@ -46,11 +46,12 @@ std::string smallestTerm() {
 
 void varbyteEncode(unsigned int num, std::vector<unsigned char>& bytes) {
     while (num >= 128) {
-        bytes.push_back(128 + (num & 127)); // lowest 7 bits + "more bytes coming"
-        num = num >> 7; // drop those 7 bits
+        bytes.push_back(128 + (num % 128)); // lowest 7 bits + "more bytes coming"
+        num = num / 128; // drop those 7 bits
     }
     bytes.push_back(num); // last byte
 }
+
 void writeList(const std::string& term, const std::vector<int>& docIDs, const std::vector<int>& freqs) {
     long long start = index_position;
     long long first_block = block_number;

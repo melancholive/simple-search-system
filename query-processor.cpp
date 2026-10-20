@@ -8,7 +8,11 @@
 #include <unordered_map>
 #include <algorithm> // sort
 #include <unordered_set>
+#include <queue>
+#include <climits> // UINT_MAX
 
+const int num_results = 10;
+using total_score = std::pair<double, unsigned int>; // (total_score, docID)
 
 // loaded from stats.csv
 long long passage_count;
@@ -25,7 +29,7 @@ struct lexicon_data{
     long long start; // byte offset in index.bin / where first block of term begins
     int doc_freq; // total documents for term
     int num_blocks; // num of 128 post blocks for term
-    long long first_block; // index of term's first block
+    long long first_block; // index of term's first block in block_metadatas
 };
 
 unsigned int varbyte_decode(const std::vector<unsigned char>& bytes, std::size_t& pos) {
@@ -78,9 +82,9 @@ double BM25_ranking(int term_freq, int doc_length, long long doc_freq, long long
     return inverse_doc_freq * scaled_term_freq;
 }
 
-class ListReader {
+class PostingReader { // iterate through a term's postings, loading blocks from index, and returning docIDs + freqs
     public:
-        ListReader(std::ifstream& index_stream, const lexicon_data& term_data): 
+        PostingReader(std::ifstream& index_stream, const lexicon_data& term_data): 
             index_stream(index_stream), term_data(term_data), current_byte_offset(term_data.start) {}
 
         bool seek(unsigned int target) { // move to first posting with docID >= target + return true if found
@@ -91,7 +95,7 @@ class ListReader {
                 const block_meta& m = block_metadatas[term_data.first_block + block_index];
                 
                 if (m.last_docID < target) { // skip block if its max docID is below the target
-                    prev_block_last_docID = m.last_docID; // 
+                    prev_block_last_docID = m.last_docID;
                     current_byte_offset += m.doc_bytes + m.freq_bytes; // jump to start of next block
                     block_index++;
                     pos_in_block = 0;
@@ -190,11 +194,8 @@ class ListReader {
         long long current_byte_offset; // byte offset in index.bin of current block's start
 };
 
-void search_setup(const std::unordered_set<std::string>& terms,
-                const std::unordered_map<std::string, lexicon_data>& lexicon, 
-                std::vector<lexicon_data>& term_data,
-                std::vector<ListReader>& readers,
-                std::ifstream& index_file){
+void search_setup(const std::unordered_set<std::string>& terms, const std::unordered_map<std::string, lexicon_data>& lexicon, 
+                std::vector<lexicon_data>& term_data, std::vector<PostingReader>& readers, std::ifstream& index_file){
     // get lexicon data for each term
     for (const auto& t : terms) {
         auto iterator = lexicon.find(t);
@@ -203,63 +204,81 @@ void search_setup(const std::unordered_set<std::string>& terms,
         }
     }
 
-    // create a ListReader for each term.
+    // create a PostingReader for each term.
     for (std::size_t i = 0; i < term_data.size(); i++){
-        readers.push_back(ListReader(index_file, term_data[i]));
+        readers.push_back(PostingReader(index_file, term_data[i]));
     }
 }
 
-void print_results(std::vector<std::pair<int, double>>& results){
-    // sort by score descending, then print top 10.
-    std::sort(results.begin(), results.end(),
-              [](const std::pair<int,double>& a, const std::pair<int,double>& b){
-                  return a.second > b.second;
-              });
-              
-    int count = 0;
+void print_results(std::priority_queue<total_score, std::vector<total_score>, std::greater<total_score>> top_results){
+    if (top_results.empty()) {
+        std::cout << "no results" << std::endl;
+        return;
+    }
+    
+    // store in temp vector
+    std::vector<total_score> final_results;
+    while (!top_results.empty()){
+        final_results.push_back(top_results.top());
+        top_results.pop();
+    }
+
+    // print in reverse
     std::cout << "docID | score"  << std::endl;
-    for (std::size_t i = 0; i < results.size() && count < 10; i++, count++)
-        std::cout << results[i].first << " | " << results[i].second << std::endl;
-    if (count == 0) std::cout << "no results" << std::endl;
+    for (auto it = final_results.rbegin(); it != final_results.rend(); ++it){
+        std::cout << it->second << " | " << it->first << std::endl;
+    }
 }
 
-void disjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListReader>& readers, const std::vector<int>& word_counts){
-    // get the total BM25 for each docID
-    std::unordered_map<int,double> total_score;
-    for (std::size_t i = 0; i < readers.size(); i++) {
-        if (!readers[i].seek(0)) continue;
-        while (readers[i].is_valid()) {
-            unsigned int d = readers[i].get_docID();
-            unsigned int f = readers[i].get_freq();
-            int dl = word_counts[d];
-            total_score[d] += BM25_ranking(f, dl, term_data[i].doc_freq, passage_count, avg_doc_length);
-            readers[i].next();
+void disjunctive_search(std::vector<lexicon_data>& term_data, std::vector<PostingReader>& readers, const std::vector<int>& word_counts){
+    // use a min heap to pop off the min element when size is greater than num_results
+    std::priority_queue<total_score, std::vector<total_score>, std::greater<total_score>> top_results; 
+
+    while(true){
+        unsigned int target = UINT_MAX; // keep track of the minimum docID
+        bool valid_reader = false; // keep looping while any reader still has postings remaining
+
+        for (std::size_t i = 0; i < readers.size(); i++)
+            if (readers[i].is_valid() && readers[i].get_docID() < target){
+                target = readers[i].get_docID();
+                valid_reader = true;
+            }
+
+        if (!valid_reader) break; // all postings have been checked
+
+        double score = 0.0;
+        for (std::size_t i = 0; i < readers.size(); i++) {
+            if (!readers[i].is_valid()) continue;
+
+            if (readers[i].get_docID() == target) {
+                unsigned int f = readers[i].get_freq();
+                int dl = word_counts[target];
+                score += BM25_ranking(f, dl, term_data[i].doc_freq, passage_count, avg_doc_length);
+                readers[i].next();  // advance past target
+            }
         }
+
+        // add scores to min heap if score is greater than the minimum
+        if (top_results.size() < num_results) {
+            top_results.push({score, target});
+        } else if (score > top_results.top().first) { // if there are more than num_results, pop min first
+            top_results.pop();
+            top_results.push({score, target});
+        }
+        
     }
 
-    // convert to a sortable vector.
-    std::vector<std::pair<int,double>> results(total_score.begin(), total_score.end());
-
-    print_results(results);
+    print_results(top_results);
 }
 
-void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListReader>& readers, const std::vector<int>& word_counts){
-
-    std::vector<std::pair<int,double>> results;
-
-    // set every reader on its first posting.
-    for (std::size_t i = 0; i < readers.size(); i++) {
-        if (!readers[i].seek(0)) {
-            print_results(results);
-            return;
-        }
-    }
+void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<PostingReader>& readers, const std::vector<int>& word_counts){
+    std::priority_queue<total_score, std::vector<total_score>, std::greater<total_score>> top_results; 
 
     while (true) {
         // get largest current docID across all readers.
         int target = 0;
         for (std::size_t i = 0; i < readers.size(); i++)
-            if (readers[i].get_docID() > target) target = readers[i].get_docID();
+            if (readers[i].is_valid() && readers[i].get_docID() > target) target = readers[i].get_docID();
 
         // align every reader on target docID.
         bool match = true;
@@ -267,7 +286,7 @@ void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListRe
             if (!readers[i].seek(target)) {
                 // this term has no more postings >= target
                 // no other doc can contain all terms
-                print_results(results);
+                print_results(top_results);
                 return;
             }
             if (readers[i].get_docID() != target) {
@@ -282,16 +301,22 @@ void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListRe
         // if all docID match, score the document
         int dl = word_counts[target];
 
-        double total_score = 0.0;
+        double score = 0.0;
         for (std::size_t i = 0; i < readers.size(); i++)
-            total_score += BM25_ranking(readers[i].get_freq(), dl, term_data[i].doc_freq, passage_count, avg_doc_length);
+            score += BM25_ranking(readers[i].get_freq(), dl, term_data[i].doc_freq, passage_count, avg_doc_length);
         
-        results.push_back({target, total_score});
+        // add scores to min heap if score is greater than the minimum
+        if (top_results.size() < num_results) {
+            top_results.push({score, target});
+        } else if (score > top_results.top().first) { // if there are more than num_results, pop min first
+            top_results.pop();
+            top_results.push({score, target});
+        }
 
-        // advance to the current max
+        // advance each to the next posting
         for (std::size_t i = 0; i < readers.size(); i++)
             if (!readers[i].next()){ // if any reader ran out, no future match is possible
-                print_results(results);
+                print_results(top_results);
                 return;
             }
     }
@@ -363,7 +388,7 @@ int main() {
     while (true){
         // get type of query, disjuctive or conjuctive
         std::string query_type;
-        std::cout << "disjunctive or conjunctive query processing" << std::endl;
+        std::cout << "disjunctive or conjunctive : ";
         std::getline(std::cin, query_type);
         if (query_type != "disjunctive" && query_type != "conjunctive"){
             break;
@@ -392,13 +417,16 @@ int main() {
         }
 
         std::vector<lexicon_data> term_data;
-        std::vector<ListReader> readers;
+        std::vector<PostingReader> readers;
         search_setup(query_terms, lexicon, term_data, readers, index_file);
         if (term_data.empty()){
             std::cout << "no terms found in index" << std::endl;
             continue;
         }
 
+        // set every reader on its first posting.
+        for (std::size_t i = 0; i < readers.size(); i++) readers[i].seek(0);
+        
         if (query_type == "disjunctive"){
             disjunctive_search(term_data, readers, word_counts);
         } else if (term_data.size() == query_terms.size()) { // conjunctive + make sure that all terms exist
