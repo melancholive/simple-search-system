@@ -80,17 +80,15 @@ double BM25_ranking(int term_freq, int doc_length, long long doc_freq, long long
 
 class ListReader {
     public:
-        ListReader(std::ifstream& index_stream_in, const lexicon_data& term_entry_in): 
-            index_stream(index_stream_in), term_entry(term_entry_in),
-            block_idx(0), pos_in_block(0), prev_block_last_docID(0), current_docID(0), current_freq(0),
-            has_current(false), loaded_block_idx(-1), current_byte_offset(term_entry_in.start) {}
+        ListReader(std::ifstream& index_stream, const lexicon_data& term_data): 
+            index_stream(index_stream), term_data(term_data), current_byte_offset(term_data.start) {}
 
         bool seek(unsigned int target) { // move to first posting with docID >= target + return true if found
             // if already at or past target -> return true
             if (has_current && current_docID >= target) return true;
             
-            while (block_idx < term_entry.num_blocks) { // linear scan over blocks
-                const block_meta& m = block_metadatas[term_entry.first_block + block_idx];
+            while (block_idx < term_data.num_blocks) { // linear scan over blocks
+                const block_meta& m = block_metadatas[term_data.first_block + block_idx];
                 
                 if (m.last_docID < target) { // skip block if its max docID is below the target
                     prev_block_last_docID = m.last_docID;
@@ -135,13 +133,14 @@ class ListReader {
             }
 
             // move to next block.
-            const block_meta& prev_m = block_metadatas[term_entry.first_block + block_idx];
+            const block_meta& prev_m = block_metadatas[term_data.first_block + block_idx];
+            prev_block_last_docID = prev_m.last_docID;
             current_byte_offset += prev_m.doc_bytes + prev_m.freq_bytes;
             block_idx++;
             pos_in_block = 0;
 
-            while (block_idx < term_entry.num_blocks) {
-                const block_meta& m = block_metadatas[term_entry.first_block + block_idx];
+            while (block_idx < term_data.num_blocks) {
+                const block_meta& m = block_metadatas[term_data.first_block + block_idx];
                 load_block(block_idx);
                 if (pos_in_block < current_block.size()) {
                     current_docID = current_block[pos_in_block].first;
@@ -166,7 +165,7 @@ class ListReader {
         void load_block(long long b) {
             if (loaded_block_idx == b) return; // already loaded
 
-            const block_meta& m = block_metadatas[term_entry.first_block + b];
+            const block_meta& m = block_metadatas[term_data.first_block + b];
             index_stream.clear();
             index_stream.seekg(current_byte_offset, std::ios::beg);
             std::vector<unsigned char> buf(m.doc_bytes + m.freq_bytes);
@@ -177,17 +176,17 @@ class ListReader {
         }
 
         std::ifstream& index_stream;
-        lexicon_data term_entry;
+        lexicon_data term_data;
 
-        long long block_idx; // block index of term
-        std::size_t pos_in_block; // index of next posting within current_block
-        unsigned int prev_block_last_docID; // last docID of previous block, 0 if none
-        unsigned int current_docID; // docID of current posting
-        unsigned int current_freq; // freq of current posting
-        bool has_current; // if current posting is valid
+        long long block_idx = 0; // block index of term
+        std::size_t pos_in_block = 0; // index of next posting within current_block
+        unsigned int prev_block_last_docID = 0; // last docID of previous block, 0 if none
+        unsigned int current_docID = 0; // docID of current posting
+        unsigned int current_freq = 0; // freq of current posting
+        bool has_current = false; // if current posting is valid
 
         std::vector<std::pair<unsigned int, unsigned int>> current_block; // decoded postings of loaded block
-        long long loaded_block_idx; // block index currently decoded into current_block (-1 = none)
+        long long loaded_block_idx = -1; // block index currently decoded into current_block (-1 = none)
         long long current_byte_offset; // byte offset in index.bin of current block's start
 };
 
@@ -195,7 +194,7 @@ void search_setup(const std::unordered_set<std::string>& terms,
                 const std::unordered_map<std::string, lexicon_data>& lexicon, 
                 std::vector<lexicon_data>& term_data,
                 std::vector<ListReader>& readers,
-                std::ifstream& idxFile){
+                std::ifstream& index_file){
     // get lexicon data for each term
     for (const auto& t : terms) {
         auto iterator = lexicon.find(t);
@@ -206,7 +205,7 @@ void search_setup(const std::unordered_set<std::string>& terms,
 
     // create a ListReader for each term.
     for (std::size_t i = 0; i < term_data.size(); i++){
-        readers.push_back(ListReader(idxFile, term_data[i]));
+        readers.push_back(ListReader(index_file, term_data[i]));
     }
 }
 
@@ -251,6 +250,14 @@ void conjunctive_search(std::vector<lexicon_data>& term_data,
                         const std::vector<int>& word_counts){
 
     std::vector<std::pair<int,double>> results;
+
+    // set every reader on its first posting.
+    for (std::size_t i = 0; i < readers.size(); i++) {
+        if (!readers[i].seek(0)) {
+            print_results(results);
+            return;
+        }
+    }
 
     while (true) {
         // get largest current docID across all readers.
