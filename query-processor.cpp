@@ -85,26 +85,26 @@ class ListReader {
 
         bool seek(unsigned int target) { // move to first posting with docID >= target + return true if found
             // if already at or past target -> return true
-            if (has_current && current_docID >= target) return true;
+            if (valid_posting && current_docID >= target) return true;
             
-            while (block_idx < term_data.num_blocks) { // linear scan over blocks
-                const block_meta& m = block_metadatas[term_data.first_block + block_idx];
+            while (block_index < term_data.num_blocks) { // linear scan over blocks
+                const block_meta& m = block_metadatas[term_data.first_block + block_index];
                 
                 if (m.last_docID < target) { // skip block if its max docID is below the target
-                    prev_block_last_docID = m.last_docID;
-                    current_byte_offset += m.doc_bytes + m.freq_bytes;
-                    block_idx++;
+                    prev_block_last_docID = m.last_docID; // 
+                    current_byte_offset += m.doc_bytes + m.freq_bytes; // jump to start of next block
+                    block_index++;
                     pos_in_block = 0;
-                    loaded_block_idx = -1;
+                    loaded_block_index = -1;
                     continue;
                 }
 
-                load_block(block_idx); 
-                while (pos_in_block < current_block.size()) {
+                load_block(block_index); // load the current block
+                while (pos_in_block < current_block.size()) { // loop until the docID of the current posting is >= target
                     if (current_block[pos_in_block].first >= target) {
                         current_docID = current_block[pos_in_block].first;
                         current_freq = current_block[pos_in_block].second;
-                        has_current = true;
+                        valid_posting = true;
                         return true;
                     }
                     pos_in_block++;
@@ -113,17 +113,17 @@ class ListReader {
                 // no match found
                 prev_block_last_docID = m.last_docID;
                 current_byte_offset += m.doc_bytes + m.freq_bytes;
-                block_idx++;
+                block_index++;
                 pos_in_block = 0;
-                loaded_block_idx = -1;
+                loaded_block_index = -1;
             }
 
-            has_current = false;
+            valid_posting = false;
             return false;
         }
 
         bool next() { // move to next posting
-            if (!has_current) return false;
+            if (!valid_posting) return false;
 
             pos_in_block++;
             if (pos_in_block < current_block.size()) {
@@ -133,15 +133,15 @@ class ListReader {
             }
 
             // move to next block.
-            const block_meta& prev_m = block_metadatas[term_data.first_block + block_idx];
+            const block_meta& prev_m = block_metadatas[term_data.first_block + block_index];
             prev_block_last_docID = prev_m.last_docID;
             current_byte_offset += prev_m.doc_bytes + prev_m.freq_bytes;
-            block_idx++;
+            block_index++;
             pos_in_block = 0;
 
-            while (block_idx < term_data.num_blocks) {
-                const block_meta& m = block_metadatas[term_data.first_block + block_idx];
-                load_block(block_idx);
+            while (block_index < term_data.num_blocks) {
+                const block_meta& m = block_metadatas[term_data.first_block + block_index];
+                load_block(block_index);
                 if (pos_in_block < current_block.size()) {
                     current_docID = current_block[pos_in_block].first;
                     current_freq = current_block[pos_in_block].second;
@@ -149,44 +149,44 @@ class ListReader {
                 }
                 prev_block_last_docID = m.last_docID;
                 current_byte_offset += m.doc_bytes + m.freq_bytes;
-                block_idx++;
+                block_index++;
                 pos_in_block = 0;
-                loaded_block_idx = -1;
+                loaded_block_index = -1;
             }
-            has_current = false;
+            valid_posting = false;
             return false;
         }
 
         unsigned int get_docID() const { return current_docID; }
         unsigned int get_freq() const { return current_freq; }
-        bool is_valid() const { return has_current; }
+        bool is_valid() const { return valid_posting; }
 
     private:
         void load_block(long long b) {
-            if (loaded_block_idx == b) return; // already loaded
+            if (loaded_block_index == b) return; // already loaded
 
             const block_meta& m = block_metadatas[term_data.first_block + b];
             index_stream.clear();
-            index_stream.seekg(current_byte_offset, std::ios::beg);
-            std::vector<unsigned char> buf(m.doc_bytes + m.freq_bytes);
-            index_stream.read(reinterpret_cast<char*>(&buf[0]), buf.size());
-            decode_block(buf, m, prev_block_last_docID, current_block);
+            index_stream.seekg(current_byte_offset, std::ios::beg); // move file cursor to first byte of block in index.bin
+            std::vector<unsigned char> buffer(m.doc_bytes + m.freq_bytes); // allocate buffer the size of the block
+            index_stream.read((char*)buffer.data(), buffer.size()); // cast buffer data to char* so index stream can be read
+            decode_block(buffer, m, prev_block_last_docID, current_block);
             pos_in_block = 0;
-            loaded_block_idx = b;
+            loaded_block_index = b;
         }
 
         std::ifstream& index_stream;
         lexicon_data term_data;
 
-        long long block_idx = 0; // block index of term
+        long long block_index = 0; // block index of term
         std::size_t pos_in_block = 0; // index of next posting within current_block
         unsigned int prev_block_last_docID = 0; // last docID of previous block, 0 if none
         unsigned int current_docID = 0; // docID of current posting
         unsigned int current_freq = 0; // freq of current posting
-        bool has_current = false; // if current posting is valid
+        bool valid_posting = false; // if current posting exists
 
         std::vector<std::pair<unsigned int, unsigned int>> current_block; // decoded postings of loaded block
-        long long loaded_block_idx = -1; // block index currently decoded into current_block (-1 = none)
+        long long loaded_block_index = -1; // block index currently decoded into current_block (-1 = none)
         long long current_byte_offset; // byte offset in index.bin of current block's start
 };
 
@@ -238,16 +238,12 @@ void disjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListRe
     }
 
     // convert to a sortable vector.
-    std::vector<std::pair<int,double> > results;
-    for (std::unordered_map<int,double>::iterator it = total_score.begin(); it != total_score.end(); ++it)
-        results.push_back({it->first, it->second});
+    std::vector<std::pair<int,double>> results(total_score.begin(), total_score.end());
 
     print_results(results);
 }
 
-void conjunctive_search(std::vector<lexicon_data>& term_data,
-                        std::vector<ListReader>& readers,
-                        const std::vector<int>& word_counts){
+void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<ListReader>& readers, const std::vector<int>& word_counts){
 
     std::vector<std::pair<int,double>> results;
 
@@ -289,6 +285,7 @@ void conjunctive_search(std::vector<lexicon_data>& term_data,
         double total_score = 0.0;
         for (std::size_t i = 0; i < readers.size(); i++)
             total_score += BM25_ranking(readers[i].get_freq(), dl, term_data[i].doc_freq, passage_count, avg_doc_length);
+        
         results.push_back({target, total_score});
 
         // advance to the current max
