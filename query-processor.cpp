@@ -47,21 +47,26 @@ unsigned int varbyte_decode(const std::vector<unsigned char>& bytes, std::size_t
     return result; 
 }
 
-void decode_block(const std::vector<unsigned char>& bytes, const block_meta& meta, 
-                    unsigned int prev_doc_id, std::vector<std::pair<unsigned int, unsigned int>>& out){
-    out.clear(); // reset output
+void decode_docID(const std::vector<unsigned char>& bytes, const block_meta& meta, 
+                    unsigned int prev_doc_id, std::vector<unsigned int>& docIDs){
+    docIDs.clear(); // reset output
     
     unsigned int prev = prev_doc_id;
     std::size_t doc_pos = 0;
-    std::size_t freq_pos = meta.doc_bytes;
     
     while (doc_pos < meta.doc_bytes) { // stop when reaching the freq block region
         unsigned int gap = varbyte_decode(bytes, doc_pos);
         prev += gap; // calculate actual doc id
-
-        unsigned int freq = varbyte_decode(bytes, freq_pos);
-        out.push_back({prev, freq});
+        docIDs.push_back(prev);
     }
+}
+
+// advance pos past one varbyte without computing the value 
+void skip_varbyte(const std::vector<unsigned char>& bytes, std::size_t& pos){  
+    while (bytes[pos] & 128){ // while continuation bit is 1, advance pos
+        pos++;
+    }
+    pos++; // end of current byte
 }
 
 double BM25_ranking(int term_freq, int doc_length, long long doc_freq, long long N, double avg_doc_length){
@@ -98,27 +103,37 @@ class PostingReader { // iterate through a term's postings, loading blocks from 
                     prev_block_last_docID = m.last_docID;
                     current_byte_offset += m.doc_bytes + m.freq_bytes; // jump to start of next block
                     block_index++;
-                    pos_in_block = 0;
+                    docID_pos = 0;
                     loaded_block_index = -1;
                     continue;
                 }
 
                 load_block(block_index); // load the current block
-                while (pos_in_block < current_block.size()) { // loop until the docID of the current posting is >= target
-                    if (current_block[pos_in_block].first >= target) {
-                        current_docID = current_block[pos_in_block].first;
-                        current_freq = current_block[pos_in_block].second;
-                        valid_posting = true;
-                        return true;
+
+                std::size_t skip = 0; // num of varbyte freqs to skip
+                while (docID_pos < docIDs.size() && docIDs[docID_pos] < target) { // loop until the docID of the current posting is >= target
+                    docID_pos++;
+                    skip++;
+                }
+
+                if (docID_pos < docIDs.size() ) { // move to the current freq
+                    while (skip > 0){
+                        skip_varbyte(freq_block,freq_pos);
+                        skip--;
                     }
-                    pos_in_block++;
+                    // decode the current freq
+                    current_docID = docIDs[docID_pos];
+                    current_freq = varbyte_decode(freq_block, freq_pos);
+
+                    valid_posting = true;
+                    return true;
                 }
 
                 // no match found
                 prev_block_last_docID = m.last_docID;
                 current_byte_offset += m.doc_bytes + m.freq_bytes;
                 block_index++;
-                pos_in_block = 0;
+                docID_pos = 0;
                 loaded_block_index = -1;
             }
 
@@ -129,32 +144,33 @@ class PostingReader { // iterate through a term's postings, loading blocks from 
         bool next() { // move to next posting
             if (!valid_posting) return false;
 
-            pos_in_block++;
-            if (pos_in_block < current_block.size()) {
-                current_docID = current_block[pos_in_block].first;
-                current_freq = current_block[pos_in_block].second;
+            docID_pos++;
+            if (docID_pos < docIDs.size()) {
+                current_docID = docIDs[docID_pos];
+                current_freq = varbyte_decode(freq_block, freq_pos);
                 return true;
             }
 
-            // move to next block.
+            // move to next block
             const block_meta& prev_m = block_metadatas[term_data.first_block + block_index];
             prev_block_last_docID = prev_m.last_docID;
             current_byte_offset += prev_m.doc_bytes + prev_m.freq_bytes;
             block_index++;
-            pos_in_block = 0;
+            docID_pos = 0;
 
             while (block_index < term_data.num_blocks) {
                 const block_meta& m = block_metadatas[term_data.first_block + block_index];
                 load_block(block_index);
-                if (pos_in_block < current_block.size()) {
-                    current_docID = current_block[pos_in_block].first;
-                    current_freq = current_block[pos_in_block].second;
+                if (docID_pos < docIDs.size()) {
+                    current_docID = docIDs[docID_pos];
+                    current_freq = varbyte_decode(freq_block, freq_pos);
                     return true;
                 }
+
                 prev_block_last_docID = m.last_docID;
                 current_byte_offset += m.doc_bytes + m.freq_bytes;
                 block_index++;
-                pos_in_block = 0;
+                docID_pos = 0;
                 loaded_block_index = -1;
             }
             valid_posting = false;
@@ -172,24 +188,40 @@ class PostingReader { // iterate through a term's postings, loading blocks from 
             const block_meta& m = block_metadatas[term_data.first_block + b];
             index_stream.clear();
             index_stream.seekg(current_byte_offset, std::ios::beg); // move file cursor to first byte of block in index.bin
+
             std::vector<unsigned char> buffer(m.doc_bytes + m.freq_bytes); // allocate buffer the size of the block
-            index_stream.read((char*)buffer.data(), buffer.size()); // cast buffer data to char* so index stream can be read
-            decode_block(buffer, m, prev_block_last_docID, current_block);
-            pos_in_block = 0;
+            if(!index_stream.read((char*)buffer.data(), buffer.size())){ // cast buffer data to char* so index stream can be read
+                valid_posting = false;
+                docIDs.clear();
+                freq_block.clear();
+                return;
+            }
+
+            // decode docIDs
+            decode_docID(buffer, m, prev_block_last_docID, docIDs);
+
+            // copy raw bytes
+            freq_block.assign(buffer.begin() + m.doc_bytes, buffer.end());
+
+            docID_pos = 0;
+            freq_pos = 0;
             loaded_block_index = b;
         }
 
         std::ifstream& index_stream;
         lexicon_data term_data;
 
-        long long block_index = 0; // block index of term
-        std::size_t pos_in_block = 0; // index of next posting within current_block
+        std::vector<unsigned int> docIDs; // decoded (true) docIDs of current block
+        std::vector<unsigned char> freq_block; // varbyte freq of the current block
+        std::size_t docID_pos = 0; // index position of docID in current block
+        std::size_t freq_pos = 0; // byte positon in freq_block of the current posting
+
+        long long block_index = 0; // index of current block
         unsigned int prev_block_last_docID = 0; // last docID of previous block, 0 if none
         unsigned int current_docID = 0; // docID of current posting
         unsigned int current_freq = 0; // freq of current posting
         bool valid_posting = false; // if current posting exists
 
-        std::vector<std::pair<unsigned int, unsigned int>> current_block; // decoded postings of loaded block
         long long loaded_block_index = -1; // block index currently decoded into current_block (-1 = none)
         long long current_byte_offset; // byte offset in index.bin of current block's start
 };
@@ -236,18 +268,19 @@ void disjunctive_search(std::vector<lexicon_data>& term_data, std::vector<Postin
 
     while(true){
         unsigned int target = UINT_MAX; // keep track of the minimum docID
-        bool valid_reader = false; // keep looping while any reader still has postings remaining
+        bool valid_reader = false; // loop while any reader has postings remaining
 
-        for (std::size_t i = 0; i < readers.size(); i++)
+        for (std::size_t i = 0; i < readers.size(); i++){ // get the min target value
             if (readers[i].is_valid() && readers[i].get_docID() < target){
                 target = readers[i].get_docID();
                 valid_reader = true;
             }
+        }
 
-        if (!valid_reader) break; // all postings have been checked
+        if (!valid_reader) break; 
 
         double score = 0.0;
-        for (std::size_t i = 0; i < readers.size(); i++) {
+        for (std::size_t i = 0; i < readers.size(); i++) { // get total score of the target docID
             if (!readers[i].is_valid()) continue;
 
             if (readers[i].get_docID() == target) {
@@ -258,7 +291,7 @@ void disjunctive_search(std::vector<lexicon_data>& term_data, std::vector<Postin
             }
         }
 
-        // add scores to min heap if score is greater than the minimum
+        // add score to top results if score is greater than the minimum
         if (top_results.size() < num_results) {
             top_results.push({score, target});
         } else if (score > top_results.top().first) { // if there are more than num_results, pop min first
@@ -276,7 +309,7 @@ void conjunctive_search(std::vector<lexicon_data>& term_data, std::vector<Postin
 
     while (true) {
         // get largest current docID across all readers.
-        int target = 0;
+        unsigned int target = 0;
         for (std::size_t i = 0; i < readers.size(); i++)
             if (readers[i].is_valid() && readers[i].get_docID() > target) target = readers[i].get_docID();
 
@@ -416,6 +449,7 @@ int main() {
             query_terms.insert(term);
         }
 
+        // set up data for search
         std::vector<lexicon_data> term_data;
         std::vector<PostingReader> readers;
         search_setup(query_terms, lexicon, term_data, readers, index_file);
@@ -424,7 +458,7 @@ int main() {
             continue;
         }
 
-        // set every reader on its first posting.
+        // set every reader on its first posting
         for (std::size_t i = 0; i < readers.size(); i++) readers[i].seek(0);
         
         if (query_type == "disjunctive"){
